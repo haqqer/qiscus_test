@@ -19,14 +19,11 @@ import (
 )
 
 var (
-	APP_ID     = "tqxyb-ivaigtav3oku4cj"
-	SECRET_KEY = "6df96f4525cf12f2bc315d4c1eb98d5e"
-	CHANNEL_ID = "131203"
-	BASE_URL   = "https://omnichannel.qiscus.com"
-	REDIS_HOST = "127.0.0.1:6379"
-	REDIS_PASS = ""
-	REDIS_URL  = "redis://127.0.0.1:6379"
-	// REDIS_URL    = "rediss://default:AVITAAIjcDE4MTk2ZTAwNjk2Yjk0NWNkOTQ1MDI3MjhmMGM5NzI1Y3AxMA@glad-wahoo-21011.upstash.io:6379"
+	APP_ID       = "tqxyb-ivaigtav3oku4cj"
+	SECRET_KEY   = "6df96f4525cf12f2bc315d4c1eb98d5e"
+	CHANNEL_ID   = "131203"
+	BASE_URL     = "https://omnichannel.qiscus.com"
+	REDIS_URL    = "redis://127.0.0.1:6379"
 	MAX_CUSTOMER = 5
 )
 
@@ -250,6 +247,10 @@ func Serve() {
 					log.Println("Agents empty")
 					continue
 				}
+				if selectedAgent.CurrentCustomerCount >= MAX_CUSTOMER {
+					log.Println("Agents are full right now")
+					continue
+				}
 				log.Println("ASSIGN agent_ID " + selectedAgent.Email + " room_ID: " + roomID)
 				respAssignAgent, err := AssignAgent(roomID, selectedAgent.ID)
 				if err != nil {
@@ -267,48 +268,48 @@ func Serve() {
 					fmt.Printf("Popped element: %s\n", poppedItem)
 				}
 
-				pushItem, err := queue.client.RPush(ctx, "RESOLVE_QUEUE", roomID).Result()
-				if err == redis.Nil {
-					fmt.Println("List is empty, no element popped.")
-				} else if err != nil {
-					log.Fatalf("Error popping from list: %v", err)
-				} else {
-					fmt.Printf("Popped element: %d\n", pushItem)
-				}
+				// pushItem, err := queue.client.RPush(ctx, "RESOLVE_QUEUE", roomID).Result()
+				// if err == redis.Nil {
+				// 	fmt.Println("List is empty, no element popped.")
+				// } else if err != nil {
+				// 	log.Fatalf("Error popping from list: %v", err)
+				// } else {
+				// 	fmt.Printf("Popped element: %d\n", pushItem)
+				// }
 			}
 			time.Sleep(5 * time.Second)
 		}
 	}(ctx, MAX_CUSTOMER)
 
-	go func(ctx context.Context) {
-		log.Println("Resolver Worker is running...")
-		for {
-			resultResolve := queue.client.LIndex(ctx, "RESOLVE_QUEUE", 0)
+	// go func(ctx context.Context) {
+	// 	log.Println("Resolver Worker is running...")
+	// 	for {
+	// 		resultResolve := queue.client.LIndex(ctx, "RESOLVE_QUEUE", 0)
 
-			if resultResolve.Err() == redis.Nil {
-				log.Println("QUEUE RESOLVE EMPTY!")
-			} else {
-				roomIDResolve := resultResolve.Val()
-				log.Println("RESOLVING room_ID: " + roomIDResolve)
-				resp, err := MarkAsResolvedAdmin(roomIDResolve)
-				if err != nil {
-					log.Println("error MarkAsResolvedAdmin : ", err.Error())
-					time.Sleep(5 * time.Second)
-					continue
-				}
-				log.Println("successfully process", resp)
-				poppedItem, err := queue.client.LPop(ctx, "RESOLVE_QUEUE").Result()
-				if err == redis.Nil {
-					fmt.Println("List is empty, no element popped.")
-				} else if err != nil {
-					log.Fatalf("Error popping from list: %v", err)
-				} else {
-					fmt.Printf("Popped element: %s\n", poppedItem)
-				}
-			}
-			time.Sleep(3 * time.Second)
-		}
-	}(ctx)
+	// 		if resultResolve.Err() == redis.Nil {
+	// 			log.Println("QUEUE RESOLVE EMPTY!")
+	// 		} else {
+	// 			roomIDResolve := resultResolve.Val()
+	// 			log.Println("RESOLVING room_ID: " + roomIDResolve)
+	// 			resp, err := MarkAsResolvedAdmin(roomIDResolve)
+	// 			if err != nil {
+	// 				log.Println("error MarkAsResolvedAdmin : ", err.Error())
+	// 				time.Sleep(5 * time.Second)
+	// 				continue
+	// 			}
+	// 			log.Println("successfully process", resp)
+	// 			poppedItem, err := queue.client.LPop(ctx, "RESOLVE_QUEUE").Result()
+	// 			if err == redis.Nil {
+	// 				fmt.Println("List is empty, no element popped.")
+	// 			} else if err != nil {
+	// 				log.Fatalf("Error popping from list: %v", err)
+	// 			} else {
+	// 				fmt.Printf("Popped element: %s\n", poppedItem)
+	// 			}
+	// 		}
+	// 		time.Sleep(3 * time.Second)
+	// 	}
+	// }(ctx)
 
 	router := http.NewServeMux()
 	router.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
@@ -325,6 +326,23 @@ func Serve() {
 			log.Println("error push to queue", err.Error())
 		}
 		log.Println("WEBHOOK HIT : ", payload)
+		ResponseSuccess(w, payload)
+	})
+
+	router.HandleFunc("POST /resolved", func(w http.ResponseWriter, r *http.Request) {
+		payload := map[string]interface{}{}
+		err := json.NewDecoder(r.Body).Decode(&payload)
+		if err != nil {
+			log.Println("Error decoder JSON:", err)
+		}
+
+		jsonBytes, err := json.MarshalIndent(payload, "", "  ")
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		log.Println("WEBHOOK RESOLVED : ", string(jsonBytes))
+
 		ResponseSuccess(w, payload)
 	})
 	// Create a new server
@@ -369,6 +387,12 @@ func main() {
 	SECRET_KEY = os.Getenv("SECRET_KEY")
 	CHANNEL_ID = os.Getenv("CHANNEL_ID")
 	BASE_URL = os.Getenv("BASE_URL")
+	REDIS_URL = os.Getenv("REDIS_URL")
+	max_customer_value, err := strconv.Atoi(os.Getenv("MAX_CUSTOMER"))
+	if err != nil {
+		fmt.Println("Error converting invalid string:", err)
+	}
+	MAX_CUSTOMER = max_customer_value
 
 	var argsRaw = os.Args
 	if len(argsRaw) <= 1 {
