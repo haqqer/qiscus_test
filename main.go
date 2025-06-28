@@ -19,15 +19,15 @@ import (
 )
 
 var (
-	APP_ID            = "tqxyb-ivaigtav3oku4cj"
-	SECRET_KEY        = "6df96f4525cf12f2bc315d4c1eb98d5e"
-	CHANNEL_ID        = "131203"
-	BASE_URL          = "https://omnichannel.qiscus.com"
-	TASK_QUEUE_KEY    = "TASK_QUEUE"
-	RESOLVE_QUEUE_KEY = "RESOLVE_QUEUE"
-	REDIS_HOST        = "127.0.0.1:6379"
-	REDIS_PASS        = ""
-	MAX_CUSTOMER      = 5
+	APP_ID     = "tqxyb-ivaigtav3oku4cj"
+	SECRET_KEY = "6df96f4525cf12f2bc315d4c1eb98d5e"
+	CHANNEL_ID = "131203"
+	BASE_URL   = "https://omnichannel.qiscus.com"
+	REDIS_HOST = "127.0.0.1:6379"
+	REDIS_PASS = ""
+	REDIS_URL  = "redis://127.0.0.1:6379"
+	// REDIS_URL    = "rediss://default:AVITAAIjcDE4MTk2ZTAwNjk2Yjk0NWNkOTQ1MDI3MjhmMGM5NzI1Y3AxMA@glad-wahoo-21011.upstash.io:6379"
+	MAX_CUSTOMER = 5
 )
 
 type ListAvailableAgents struct {
@@ -68,24 +68,16 @@ type Agent struct {
 	} `json:"user_roles"`
 }
 
-var selectedAgent Agent
-
 type RedisQueue struct {
 	client *redis.Client
-	key    string
 }
 
-// NewRedisQueue creates a new Redis FIFO queue
-func NewRedisQueue(addr, password string, db int, queueKey string) *RedisQueue {
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     addr,
-		Password: password,
-		DB:       db,
-	})
+func NewRedisQueue(redisUrl string) *RedisQueue {
+	opt, _ := redis.ParseURL(redisUrl)
+	rdb := redis.NewClient(opt)
 
 	return &RedisQueue{
 		client: rdb,
-		key:    queueKey,
 	}
 }
 func ResponseSuccess(w http.ResponseWriter, payload interface{}) {
@@ -210,7 +202,7 @@ func MarkAsResolvedAdmin(room_id string) (map[string]interface{}, error) {
 		log.Printf("Error making request: %v\n", err)
 		return nil, err
 	}
-	defer resp.Body.Close() // Ensure the response body is closed
+	defer resp.Body.Close()
 
 	payload := map[string]interface{}{}
 	err = json.NewDecoder(resp.Body).Decode(&payload)
@@ -222,7 +214,7 @@ func MarkAsResolvedAdmin(room_id string) (map[string]interface{}, error) {
 
 func Serve() {
 	ctx := context.Background()
-	queue := NewRedisQueue(REDIS_HOST, REDIS_PASS, 0, TASK_QUEUE_KEY)
+	queue := NewRedisQueue(REDIS_URL)
 	defer queue.client.Close()
 
 	ping, err := queue.client.Ping(ctx).Result()
@@ -231,11 +223,11 @@ func Serve() {
 	}
 	log.Println(ping)
 
-	go func(ctx context.Context) {
+	go func(ctx context.Context, max_customer int) {
 		log.Println("Assignment Worker is running...")
 		var selectedAgent Agent
 		for {
-			result := queue.client.LIndex(ctx, TASK_QUEUE_KEY, 0)
+			result := queue.client.LIndex(ctx, "TASK_QUEUE", 0)
 
 			if result.Err() == redis.Nil {
 				log.Println("QUEUE TASK EMPTY!")
@@ -265,24 +257,33 @@ func Serve() {
 					time.Sleep(5 * time.Second)
 					continue
 				}
-				log.Println(respAssignAgent)
-				err = queue.client.LPop(ctx, TASK_QUEUE_KEY).Err()
-				if err != nil {
-					log.Println("error process LPop Task Queue")
+				log.Println("respAssignAgent response :", respAssignAgent)
+				poppedItem, err := queue.client.LPop(ctx, "TASK_QUEUE").Result()
+				if err == redis.Nil {
+					fmt.Println("List is empty, no element popped.")
+				} else if err != nil {
+					log.Fatalf("Error popping from list: %v", err)
+				} else {
+					fmt.Printf("Popped element: %s\n", poppedItem)
 				}
-				err = queue.client.RPush(ctx, RESOLVE_QUEUE_KEY, roomID).Err()
-				if err != nil {
-					log.Println("error process RPush Resolve Queue")
+
+				pushItem, err := queue.client.RPush(ctx, "RESOLVE_QUEUE", roomID).Result()
+				if err == redis.Nil {
+					fmt.Println("List is empty, no element popped.")
+				} else if err != nil {
+					log.Fatalf("Error popping from list: %v", err)
+				} else {
+					fmt.Printf("Popped element: %d\n", pushItem)
 				}
 			}
 			time.Sleep(5 * time.Second)
 		}
-	}(ctx)
+	}(ctx, MAX_CUSTOMER)
 
 	go func(ctx context.Context) {
 		log.Println("Resolver Worker is running...")
 		for {
-			resultResolve := queue.client.LIndex(ctx, RESOLVE_QUEUE_KEY, 0)
+			resultResolve := queue.client.LIndex(ctx, "RESOLVE_QUEUE", 0)
 
 			if resultResolve.Err() == redis.Nil {
 				log.Println("QUEUE RESOLVE EMPTY!")
@@ -296,9 +297,13 @@ func Serve() {
 					continue
 				}
 				log.Println("successfully process", resp)
-				err = queue.client.LPop(ctx, RESOLVE_QUEUE_KEY).Err()
-				if err != nil {
-					log.Println("error process LPop Resolve Queue")
+				poppedItem, err := queue.client.LPop(ctx, "RESOLVE_QUEUE").Result()
+				if err == redis.Nil {
+					fmt.Println("List is empty, no element popped.")
+				} else if err != nil {
+					log.Fatalf("Error popping from list: %v", err)
+				} else {
+					fmt.Printf("Popped element: %s\n", poppedItem)
 				}
 			}
 			time.Sleep(3 * time.Second)
@@ -315,10 +320,11 @@ func Serve() {
 		if err != nil {
 			log.Println("Error decoder JSON:", err)
 		}
-		err = queue.client.RPush(r.Context(), TASK_QUEUE_KEY, payload["room_id"].(string)).Err()
+		err = queue.client.RPush(r.Context(), "TASK_QUEUE", payload["room_id"].(string)).Err()
 		if err != nil {
 			log.Println("error push to queue", err.Error())
 		}
+		log.Println("WEBHOOK HIT : ", payload)
 		ResponseSuccess(w, payload)
 	})
 	// Create a new server
@@ -363,8 +369,6 @@ func main() {
 	SECRET_KEY = os.Getenv("SECRET_KEY")
 	CHANNEL_ID = os.Getenv("CHANNEL_ID")
 	BASE_URL = os.Getenv("BASE_URL")
-	TASK_QUEUE_KEY = os.Getenv("TASK_QUEUE")
-	RESOLVE_QUEUE_KEY = os.Getenv("RESOLVE_QUEUE")
 
 	var argsRaw = os.Args
 	if len(argsRaw) <= 1 {
