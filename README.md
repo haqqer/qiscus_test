@@ -2,6 +2,24 @@
 
 ---
 
+## How to setup
+
+### Requirements
+
+1. Redis
+2. Golang 1.24.3
+
+### Step-by-step
+
+1. Please prepare redis service you can using docker or redis provider like Upstash.com
+2. Adjust enviroment variable in `.env` file
+3. Run `go mod tidy`
+4. Run `go run main.go serve` to run project
+
+### Note
+
+You can find any `APP_ID`,`SECRET_KEY` and `CHANNEL_ID` in current `.env` file
+
 ## How Webhook Works
 
 ### Flowchart of webhook
